@@ -1,14 +1,16 @@
+import logging
 import os
 import sys
 from struct import unpack, pack
+
 # from keystone import *
-from mtkclient.config.payloads import pathconfig
-from mtkclient.config.brom_config import efuse
+from mtkclient.config.payloads import PathConfig
+from mtkclient.config.brom_config import Efuse
 from mtkclient.Library.error import ErrorHandler
-from mtkclient.Library.Hardware.hwcrypto import crypto_setup, hwcrypto
-from mtkclient.Library.utils import LogBase, progress, logsetup, find_binary
-from mtkclient.Library.Hardware.seccfg import seccfgV3, seccfgV4
-from mtkclient.Library.utils import mtktee
+from mtkclient.Library.Hardware.hwcrypto import CryptoSetup, HwCrypto
+from mtkclient.Library.utils import LogBase, Progress, logsetup, find_binary
+from mtkclient.Library.Hardware.seccfg import SecCfgV3, SecCfgV4
+from mtkclient.Library.utils import MTKTee
 import json
 
 rpmb_error = [
@@ -23,11 +25,12 @@ rpmb_error = [
 ]
 
 
-class xmlflashext(metaclass=LogBase):
-    def __init__(self, mtk, xmlflash, loglevel):
-        self.pathconfig = pathconfig()
-        self.__logger = logsetup(self, self.__logger, loglevel, mtk.config.gui)
-        self.mtk = mtk
+class XmlFlashExt(metaclass=LogBase):
+    def __init__(self, _mtk, _xmlflash, loglevel):
+        self.pathconfig = PathConfig()
+        self.__logger, self.info, self.debug, self.warning, self.error = logsetup(self, self.__logger,
+                                                                                  loglevel, _mtk.config.gui)
+        self.mtk = _mtk
         self.loglevel = loglevel
         self.__logger = self.__logger
         self.eh = ErrorHandler()
@@ -38,15 +41,15 @@ class xmlflashext(metaclass=LogBase):
         self.rbyte = self.mtk.port.rbyte
         self.rdword = self.mtk.port.rdword
         self.rword = self.mtk.port.rword
-        self.xflash = xmlflash
+        self.xflash = _xmlflash
         self.xsend = self.xflash.xsend
         self.xread = self.xflash.xread
         self.da2 = None
         self.da2address = None
 
-    def patch_command(self, da2):
+    def patch_command(self, _da2):
         self.da2address = self.xflash.daconfig.da_loader.region[2].m_start_addr  # at_address
-        data = bytearray(da2)
+        data = bytearray(_da2)
         idx = data.find(b"\x00CMD:SET-HOST-INFO\x00")
         base = self.da2address
         if idx != -1:
@@ -93,26 +96,27 @@ class xmlflashext(metaclass=LogBase):
                 # newdata = b"".join(int.to_bytes(val, 1, 'little') for val in encoding)
 
                 newdata = bytes.fromhex(
-                    "704c2de910b08de20080a0e100000fe3000846e30410a0e3002098e532ff2fe100000fe3000846e3000000e3000846e3002098e532ff2fe1000000e3000846e330ff2fe1708cbde8")
+                    "704c2de910b08de20080a0e100000fe3000846e30410a0e3002098e532ff2fe100000fe3000846e3000000e3000846e3" +
+                    "002098e532ff2fe1000000e3000846e330ff2fe1708cbde8")
                 sys.stdout.flush()
                 data[addr:addr + len(newdata)] = newdata
                 newcmd = b"CMD:CUSTOM\x00"
                 data[idx + 1:idx + 1 + len(newcmd)] = newcmd
                 return data
-        return da2
+        return _da2
 
     def ack(self):
         xmlcmd = self.xflash.Cmd.create_cmd("CUSTOMACK")
         if self.xsend(xmlcmd):
             # result =
-            self.xflash.get_response()
+            result = self.xflash.get_response()
             # DATA data =
-            self.xflash.get_response(raw=True)
+            data = self.xflash.get_response(raw=True)
             # CMD:END result =
-            self.xflash.get_response()
+            result2 = self.xflash.get_response()
             self.xflash.ack()
             # CMD:START result =
-            self.xflash.get_response()
+            resp = self.xflash.get_response()
             self.xflash.ack()
             if data == b"\xA4\xA3\xA2\xA1":
                 return True
@@ -198,16 +202,17 @@ class xmlflashext(metaclass=LogBase):
                 return daextdata
         return None
 
-    def patch_da1(self, da1):
-        pass
+    def patch_da1(self, _da1):
+        return _da1
 
-    def patch_da2(self, da2):
+    def patch_da2(self, _da2):
         self.info("Patching da2 ...")
-        da2patched = bytearray(da2)
+        patched = False
+        da2patched = bytearray(_da2)
         pos = 0
         idx = 0
         while idx is not None:
-            idx = find_binary(da2, b"\x00\x00\xA0\xE3\x04\x10\xA0\xE1\x00\x20\xA0\xE3..\x00\xEB\x01\x40\x00\xE3",
+            idx = find_binary(_da2, b"\x00\x00\xA0\xE3\x04\x10\xA0\xE1\x00\x20\xA0\xE3..\x00\xEB\x01\x40\x00\xE3",
                               pos)
             if idx is not None:
                 offset = int.from_bytes(da2patched[idx + 0xC:idx + 0xE], 'little') - 1
@@ -218,17 +223,73 @@ class xmlflashext(metaclass=LogBase):
             pos += 0x14
         if patched:
             self.info("Patched read_register / write_register")
-        da2patched = self.patch_command(da2)
+        da2patched = self.patch_command(_da2)
 
         idx = find_binary(da2patched,
-                          b"\x00\xA0\xE3\x1E\xFF\x2F\xE1.\x00\xA0\xE3\x1E\xFF\x2F\xE1.\x00\xA0\xE3\x1E\xFF\x2F\xE1\x70\x4C")
+                          b"\x00\xA0\xE3\x1E\xFF\x2F\xE1.\x00\xA0\xE3\x1E\xFF\x2F\xE1." +
+                          b"\x00\xA0\xE3\x1E\xFF\x2F\xE1\x70\x4C")
         if idx is not None:
-            da2patched[idx - 1:idx - 1 + (
-                    3 * 8)] = b"\x01\x00\xA0\xE3\x1E\xFF\x2F\xE1\x01\x00\xA0\xE3\x1E\xFF\x2F\xE1\x01\x00\xA0\xE3\x1E\xFF\x2F\xE1"
+            da2patched[idx - 1:idx - 1 + (3 * 8)] = (b"\x01\x00\xA0\xE3\x1E\xFF\x2F\xE1\x01\x00\xA0" +
+                                                     b"\xE3\x1E\xFF\x2F\xE1\x01\x00\xA0\xE3\x1E\xFF\x2F\xE1")
             patched = True
             self.info("Patched write partitions / allow_read / allow_write")
         if not patched:
             self.warning("Write not allowed not patched.")
+
+        idx = find_binary(da2patched, b"\x01\x10\xA0\xE3\x00\x10\x80\xE5")
+        if idx is not None:
+            da2patched[idx:idx + 8] = b"\x00\x10\xA0\xE3\x00\x10\x80\xE5"
+            patched = True
+            self.info("Patched hash binding")
+        if not patched:
+            self.warning("Hash binding not patched.")
+
+        """idx = find_binary(da2patched,b"\xA4\x43\x00\xEB\x66\x18\x00\xEB")
+        if idx is not None:
+            da2patched[idx:idx+8] = b"\xA4\x43\x00\xEB\x08\x00\x00\xEB"
+            patched = True
+            self.info("Bypass SEC policy")
+        if not patched:
+            self.warning("SEC policy bypass not patched.")
+        """
+
+        idx2 = find_binary(da2patched, b"\x30\x48\x2D\xE9\x08\xB0\x8D\xE2\x20\xD0\x4D\xE2\x01\x50\xA0\xE1")
+        if idx2 is not None:
+            da2patched[idx2:idx2 + 8] = b"\x00\x00\xA0\xE3\x1E\xFF\x2F\xE1"
+            self.info("Patched Infinix Remote SLA authentification.")
+        else:
+            idx2 = find_binary(da2patched, b"\x70\x4C\x2D\xE9\x10\xB0\x8D\xE2\x00\x60\xA0\xE1\x02\x06\xA0\xE3")
+            if idx2 is not None:
+                da2patched[idx2:idx2 + 8] = b"\x00\x00\xA0\xE3\x1E\xFF\x2F\xE1"
+                self.info("Patched Oppo Remote SLA authentification.")
+                idx3 = find_binary(da2patched, b"\x03\x00\x00\x00\xFF\xFF\xFF\xFF\x00\x00\x00\x00\x01\x00\x00\x00")
+                if idx3 is not None:
+                    da2patched[idx3:idx3 + 4] = b"\xFF\x00\x00\x00"
+                    self.info("Patched Oppo Allowance flag.")
+            else:
+                idx2 = find_binary(da2patched,
+                                   b"\xF0\x4D\x2D\xE9\x18\xB0\x8D\xE2\x82\xDF\x4D\xE2\x01\x60\xA0" +
+                                   b"\xE1\x38\x19\x0F\xE3\x00\x70\xA0\xE1\x42\x0F\x8D\xE2")
+                if idx2 is not None:
+                    da2patched[idx2:idx2 + 8] = b"\x00\x00\xA0\xE3\x1E\xFF\x2F\xE1"
+                    self.info("Patched Vivo Remote SLA authentification.")
+                else:
+                    n = "9BB734774443D77557A76E24B10733787750D90D09C869CD606D54F28978EA6220DC9948B3C9E89284F8551D6166F3754B6A3B890AC9CDA9E37DFAA0C1317E351CE5107C4273795949C6CCE638314AB1A345385D7642CB8D055A1F410C7D7E24A6F0A2AAB8184E773D21B3754A947541680F2C1A8D6BA5BEFD3B6E1FC28EC0B61D55B1454383F2C3E8BD27170A25978608F6788B90A2FC34F0CE35056BF7520795C8C60232CBBC0B0399367AF937869CA45CF737A8A066127893E93166C433298DD6FD009E6790E743B3392ACA8EA99F61DFC77BD99416DDA4B8A9D7E4DA24217427F3584119A4932016F1735CC63B12650FDDDA73C8FCFBC79E058F36219D3D"
+                    pubkey = bytes.fromhex(n)
+                    # Generic SLA patch, just replace the public key with a known one
+                    idx2 = da2patched.rfind(b"\x01\x00\x01\x00")
+                    # Infinix / Tecno
+                    if idx2 is not None:
+                        da2patched[idx2 - 0x100:idx2] = pubkey
+                    else:
+                        # Oppo / Oneplus
+                        idx2 = find_binary(da2patched, b"0123456789ABCDEF0123456789abcdef")
+                        if idx2 is not None:
+                            da2patched[idx2 - 0x100:idx2] = pubkey
+                        self.warning("SLA authentification not patched.")
+
+        # open("da.patched.bin",
+        # "wb").write(da2patched)
         return da2patched
 
     def custom_rpmb_read(self, sector, ufs=False):
@@ -355,7 +416,7 @@ class xmlflashext(metaclass=LogBase):
         hwc.sej.sej_set_otp(otp)
 
     def read_rpmb(self, filename=None, display=True):
-        progressbar = progress(1, self.mtk.config.guiprogress)
+        progressbar = Progress(1, self.mtk.config.guiprogress)
         sectors = 0
         # val = self.custom_rpmb_init()
         ufs = False
@@ -382,7 +443,7 @@ class xmlflashext(metaclass=LogBase):
         return False
 
     def write_rpmb(self, filename=None, display=True):
-        progressbar = progress(1, self.mtk.config.guiprogress)
+        progressbar = Progress(1, self.mtk.config.guiprogress)
         if filename is None:
             self.error("Filename has to be given for writing to rpmb")
             return False
@@ -409,7 +470,7 @@ class xmlflashext(metaclass=LogBase):
         return False
 
     def erase_rpmb(self, display=True):
-        progressbar = progress(1, self.mtk.config.guiprogress)
+        progressbar = Progress(1, self.mtk.config.guiprogress)
         ufs = False
         sectors = 0
         if self.xflash.emmc.rpmb_size != 0:
@@ -549,7 +610,7 @@ class xmlflashext(metaclass=LogBase):
         return True
 
     def cryptosetup(self):
-        setup = crypto_setup()
+        setup = CryptoSetup()
         setup.blacklist = self.config.chipconfig.blacklist
         setup.gcpu_base = self.config.chipconfig.gcpu_base
         setup.dxcc_base = self.config.chipconfig.dxcc_base
@@ -560,7 +621,7 @@ class xmlflashext(metaclass=LogBase):
         setup.write32 = self.writeregister
         setup.writemem = self.writemem
         setup.hwcode = self.config.hwcode
-        return hwcrypto(setup, self.loglevel, self.config.gui)
+        return HwCrypto(setup, self.loglevel, self.config.gui)
 
     def seccfg(self, lockflag):
         if lockflag not in ["unlock", "lock"]:
@@ -585,10 +646,10 @@ class xmlflashext(metaclass=LogBase):
         hwc = self.cryptosetup()
         if seccfg_data[:0xC] == b"AND_SECCFG_v":
             self.info("Detected V3 Lockstate")
-            sc_org = seccfgV3(hwc, self.mtk)
+            sc_org = SecCfgV3(hwc, self.mtk)
         elif seccfg_data[:4] == b"\x4D\x4D\x4D\x4D":
             self.info("Detected V4 Lockstate")
-            sc_org = seccfgV4(hwc, self.mtk)
+            sc_org = SecCfgV4(hwc, self.mtk)
         else:
             return False, "Unknown lockstate or no lockstate"
         if not sc_org.parse(seccfg_data):
@@ -610,7 +671,7 @@ class xmlflashext(metaclass=LogBase):
             while idx != -1:
                 idx = data.find(b"EET KTM ", idx + 1)
                 if idx != -1:
-                    mt = mtktee()
+                    mt = MTKTee()
                     mt.parse(data[idx:])
                     rdata = hwc.mtee(data=mt.data, keyseed=mt.keyseed, ivseed=mt.ivseed,
                                      aeskey1=aeskey1, aeskey2=aeskey2)
@@ -620,7 +681,7 @@ class xmlflashext(metaclass=LogBase):
         if self.mtk.config.chipconfig.efuse_addr is not None:
             base = self.mtk.config.chipconfig.efuse_addr
             hwcode = self.mtk.config.hwcode
-            efuseconfig = efuse(base, hwcode)
+            efuseconfig = Efuse(base, hwcode)
             addr = efuseconfig.efuses[idx]
             if addr < 0x1000:
                 return int.to_bytes(addr, 4, 'little')
@@ -640,7 +701,7 @@ class xmlflashext(metaclass=LogBase):
         if self.mtk.config.chipconfig.efuse_addr is not None:
             base = self.mtk.config.chipconfig.efuse_addr
             hwcode = self.mtk.config.hwcode
-            efuseconfig = efuse(base, hwcode)
+            efuseconfig = Efuse(base, hwcode)
             data = []
             for idx in range(len(efuseconfig.efuses)):
                 addr = efuseconfig.efuses[idx]
@@ -680,7 +741,8 @@ class xmlflashext(metaclass=LogBase):
         cid = self.config.get_cid()
         otp = self.config.get_otp()
         retval = {}
-        # data=hwc.aes_hwcrypt(data=bytes.fromhex("A9 E9 DC 38 BF 6B BD 12 CC 2E F9 E6 F5 65 E8 C6 88 F7 14 11 80 2E 4D 91 8C 2B 48 A5 BB 03 C3 E5"), mode="sst", btype="sej",
+        # data=hwc.aes_hwcrypt(data=bytes.fromhex("A9 E9 DC 38 BF 6B BD 12 CC 2E F9 E6 F5 65 E8 C6 88 F7 14 11 80 " +
+        # "2E 4D 91 8C 2B 48 A5 BB 03 C3 E5"), mode="sst", btype="sej",
         #                encrypt=False)
         # self.info(data.hex())
         pubk = self.read_pubk()
